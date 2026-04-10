@@ -9,6 +9,8 @@ const db             = require('../db/db');
 const cache          = require('../utils/cache');
 const failureDetector = require('../alerts/failure.detector');
 const anomalyDetector = require('../alerts/anomaly.detector');
+const predictive     = require('../alerts/predictive');
+const errorClassifier = require('../utils/error-classifier');
 
 // Rate-limit delay (ms) between product sync jobs
 const RATE_LIMIT_MS = parseInt(process.env.SYNC_RATE_LIMIT_MS, 10) || 200;
@@ -52,8 +54,9 @@ worker.on('completed', (job) => {
 });
 
 worker.on('failed', (job, err) => {
+  const classification = errorClassifier.classify(err);
   logger.error(
-    `[WORKER] ${job.name}#${job.id} failed ` +
+    `[WORKER] ${job.name}#${job.id} failed [${classification.type}] ` +
     `(attempt ${job.attemptsMade}/${job.opts.attempts}): ${err.message}`
   );
 
@@ -68,10 +71,18 @@ worker.on('failed', (job, err) => {
   }
 });
 
-// Periodic queue backlog check (every 5 minutes)
+// Periodic predictive + anomaly check (every 5 minutes)
 setInterval(() => {
   anomalyDetector.checkQueueBacklog().catch(() => {});
+  predictive.checkQueueGrowth().catch(() => {});
 }, 5 * 60 * 1000);
+
+// Run full predictive checks every 30 minutes
+setInterval(() => {
+  predictive.runAll().catch((err) => {
+    logger.error(`[WORKER] Predictive check error: ${err.message}`);
+  });
+}, 30 * 60 * 1000);
 
 // ------------------------------------------------------------------
 //  Graceful shutdown

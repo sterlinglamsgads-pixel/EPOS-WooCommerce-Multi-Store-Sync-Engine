@@ -1,5 +1,4 @@
 const { Router }     = require('express');
-const { apiKeyAuth } = require('../middleware/auth');
 const db             = require('../db/db');
 const syncQueue      = require('../sync/sync.queue');
 const cache          = require('../utils/cache');
@@ -8,9 +7,12 @@ const analytics      = require('../alerts/analytics');
 const failureDetector = require('../alerts/failure.detector');
 const anomalyDetector = require('../alerts/anomaly.detector');
 const dailyReport    = require('../alerts/daily.report');
+const predictive     = require('../alerts/predictive');
+const selfHealer     = require('../sync/self-healer');
+const audit          = require('../utils/audit');
+const { requireAdmin, requireManager, requireViewer } = require('../middleware/jwt-auth');
 
 const router = Router();
-router.use(apiKeyAuth);
 
 // ------------------------------------------------------------------
 //  Dashboard summary
@@ -347,6 +349,107 @@ router.get('/alerts', async (req, res) => {
       [limit]
     );
     res.json({ alerts: rows });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ------------------------------------------------------------------
+//  Self-Healing: history
+// ------------------------------------------------------------------
+
+router.get('/healing/history', async (req, res) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit, 10) || 50, 200);
+    const data = await selfHealer.getHealingHistory(limit);
+    res.json({ history: data });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ------------------------------------------------------------------
+//  Self-Healing: stats
+// ------------------------------------------------------------------
+
+router.get('/healing/stats', async (_req, res) => {
+  try {
+    const data = await selfHealer.getHealingStats();
+    res.json({ stats: data });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ------------------------------------------------------------------
+//  Predictive: run checks on demand
+// ------------------------------------------------------------------
+
+router.post('/predictive/check', requireManager, async (_req, res) => {
+  try {
+    const results = await predictive.runAll();
+    res.json({ predictions: results });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ------------------------------------------------------------------
+//  Predictive: history
+// ------------------------------------------------------------------
+
+router.get('/predictive/history', async (req, res) => {
+  try {
+    const days = Math.min(parseInt(req.query.days, 10) || 7, 30);
+    const data = await predictive.getPredictionHistory(days);
+    res.json({ history: data });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ------------------------------------------------------------------
+//  Audit logs
+// ------------------------------------------------------------------
+
+router.get('/audit', requireAdmin, async (req, res) => {
+  try {
+    const limit    = Math.min(parseInt(req.query.limit, 10) || 50, 500);
+    const userId   = req.query.user_id ? parseInt(req.query.user_id, 10) : undefined;
+    const action   = req.query.action || undefined;
+    const resource = req.query.resource || undefined;
+    const data = await audit.getAuditLogs({ limit, userId, action, resource });
+    res.json({ logs: data });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ------------------------------------------------------------------
+//  Audit: distinct actions (for filter dropdown)
+// ------------------------------------------------------------------
+
+router.get('/audit/actions', requireAdmin, async (_req, res) => {
+  try {
+    const data = await audit.getDistinctActions();
+    res.json({ actions: data.map(r => r.action) });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ------------------------------------------------------------------
+//  Insights: combined dashboard data
+// ------------------------------------------------------------------
+
+router.get('/insights', async (_req, res) => {
+  try {
+    const [healStats, predictions, dailyStats] = await Promise.all([
+      selfHealer.getHealingStats(),
+      predictive.getPredictionHistory(7),
+      analytics.getDailyStats(1),
+    ]);
+    res.json({ healStats, predictions, dailyStats });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

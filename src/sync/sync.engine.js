@@ -9,6 +9,8 @@ const syncQueue              = require('./sync.queue');
 const config                 = require('../config');
 const failureDetector        = require('../alerts/failure.detector');
 const analytics              = require('../alerts/analytics');
+const errorClassifier        = require('../utils/error-classifier');
+const selfHealer             = require('./self-healer');
 
 // ------------------------------------------------------------------
 //  Store helpers
@@ -245,21 +247,36 @@ async function syncProduct(data) {
     return { action: 'create', wooProductId: newProduct.id };
 
   } catch (err) {
-    await logSync(storeId, sku, 'sync', 'failed', err.message);
+    // Classify the error
+    const classification = errorClassifier.classify(err);
+    logger.warn(`[SYNC] Error classified as ${classification.type} for SKU ${sku} (store ${storeId})`);
+
+    await logSync(storeId, sku, 'sync', 'failed', `[${classification.type}] ${err.message}`);
     await failureDetector.trackFailure(storeId, sku, err.message);
 
-    // Smart error handling based on HTTP status
-    const status = err.response?.status;
-    if (status === 401) {
+    // Attempt self-healing for DATA errors
+    const mapping = await db.getMapping(storeId, eposProduct.eposId);
+    const healResult = await selfHealer.attemptHeal(storeId, eposProduct, classification, mapping);
+    if (healResult.healed) {
+      logger.info(`[SELF-HEAL] Healed ${healResult.action} for SKU ${sku} (store ${storeId})`);
+      // Don't throw — return so BullMQ can re-queue if needed
+      return { action: 'self_healed', healAction: healResult.action };
+    }
+
+    // Smart error handling based on classification
+    if (classification.type === 'AUTH') {
       logger.error(`[SYNC] Store ${storeId}: AUTH FAILURE — check WooCommerce credentials`);
       await failureDetector.authFailure(storeId, store.name);
-      throw new UnrecoverableError(`Auth failure (401): ${err.message}`);
+      throw new UnrecoverableError(`Auth failure: ${err.message}`);
     }
-    if (status === 400) {
-      // Permanent failure — do NOT retry
-      throw new UnrecoverableError(`Permanent failure (400): ${err.message}`);
+    if (classification.type === 'DATA' && !classification.shouldRetry) {
+      throw new UnrecoverableError(`Data error: ${err.message}`);
     }
-    // 5xx / network errors — BullMQ will retry automatically
+    if (classification.type === 'RATE_LIMIT') {
+      logger.warn(`[SYNC] Store ${storeId}: Rate limited — will retry with backoff`);
+    }
+
+    // NETWORK / RATE_LIMIT / UNKNOWN — BullMQ will retry automatically
     throw err;
   }
 }

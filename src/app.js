@@ -9,8 +9,10 @@ const cache          = require('./utils/cache');
 const apiRoutes      = require('./routes/api.routes');
 const dashRoutes     = require('./routes/dashboard.routes');
 const webhookRoutes  = require('./routes/webhook.routes');
+const { router: userRoutes, ensureDefaultAdmin } = require('./routes/user.routes');
 const syncJob        = require('./cron/sync.job');
 const dailyReport    = require('./alerts/daily.report');
+const { jwtAuth }    = require('./middleware/jwt-auth');
 
 const app = express();
 
@@ -36,8 +38,9 @@ app.get('/health', (_req, res) => {
   res.json({ status: 'ok', uptime: process.uptime() });
 });
 
-app.use('/api', apiRoutes);
-app.use('/api/dashboard', dashRoutes);
+app.use('/api/users', userRoutes);
+app.use('/api', jwtAuth, apiRoutes);
+app.use('/api/dashboard', jwtAuth, dashRoutes);
 app.use('/webhooks', webhookRoutes);
 
 // Serve dashboard static files in production
@@ -51,11 +54,12 @@ app.get('/dashboard/*', (_req, res) => {
 //  Bootstrap
 // ------------------------------------------------------------------
 
-app.listen(config.port, () => {
+app.listen(config.port, async () => {
   logger.info(`[APP] Server listening on port ${config.port}`);
+  await ensureDefaultAdmin();
   syncJob.start();
   dailyReport.start();
-  logger.info('[APP] System ready');
+  logger.info('[APP] System ready — Phase 5');
 });
 
 // ------------------------------------------------------------------

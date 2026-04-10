@@ -1,6 +1,6 @@
 # EPOS ↔ WooCommerce Multi-Store Sync Engine
 
-Production-grade product synchronization between **EPOS Now** and **WooCommerce** for a multi-store business. Supports real-time webhooks, scheduled sync, queue-based processing with BullMQ, automated alerts (Telegram / Email), failure detection, sync analytics, anomaly detection, and a React admin dashboard.
+Production-grade product synchronization between **EPOS Now** and **WooCommerce** for a multi-store business. Supports real-time webhooks, scheduled sync, queue-based processing with BullMQ, automated alerts (Telegram / Email), failure detection, sync analytics, anomaly detection, **self-healing engine**, **predictive alerts**, **JWT authentication with user roles**, **audit logging**, and a React admin dashboard.
 
 ---
 
@@ -48,6 +48,12 @@ Production-grade product synchronization between **EPOS Now** and **WooCommerce*
 - **Sync analytics** — per-store metrics: synced, failed, created, skipped, avg duration
 - **Daily reports** — cron job (8 AM) sends daily summary via Telegram / Email
 - **Anomaly detection** — failure spikes, stale stores, zero-sync days, queue backlog alerts
+- **Self-healing engine** — auto-creates missing mappings, generates fallback SKUs, clears stale WooCommerce mappings, fixes duplicate SKU conflicts
+- **Error classification** — categorizes errors into NETWORK, AUTH, DATA, RATE_LIMIT, UNKNOWN — each with tailored retry strategy
+- **Predictive alerts** — detects failure trends (3-day moving average), queue growth acceleration, store sync degradation, approaching rate limits
+- **JWT authentication** — token-based auth with role-based access control (admin / manager / viewer)
+- **User management** — create, update, deactivate, and delete users; password change; default admin bootstrap
+- **Audit logging** — tracks every significant action (login, sync trigger, user CRUD) with user, IP, timestamp, and resource details
 
 ---
 
@@ -202,6 +208,9 @@ All configuration via `.env`:
 | `QUEUE_BACKLOG_THRESHOLD` | Alert if waiting > N jobs | `1000` |
 | `STALE_SYNC_HOURS` | Alert if store not synced in N hours | `24` |
 | `DAILY_REPORT_CRON` | Daily report cron expression | `0 8 * * *` |
+| `JWT_SECRET` | Secret key for JWT token signing | _(uses API_KEY if unset)_ |
+| `JWT_EXPIRY` | JWT token expiry duration | `24h` |
+| `DEFAULT_ADMIN_PASSWORD` | Password for auto-created admin user | `admin123!` |
 
 Per-store EPOS API URL and token can be overridden in the `stores` table. WooCommerce credentials are always per-store.
 
@@ -239,13 +248,17 @@ A built-in React monitoring UI served at `/dashboard/` by the Express server.
 
 | Page | Description |
 |---|---|
+| **Login** | JWT authentication page (username/password) |
 | **Dashboard** | 4 stat cards (stores, products synced, failed jobs, last sync) + 7-day bar chart |
 | **Stores** | Store table with product counts, last sync time, status, and "Sync Now" button |
+| **Analytics** | 5 KPI cards (7d), success vs failed line chart (30d), failures bar chart (14d), store performance table |
+| **Insights** | Self-healing stats (pie chart), predictive metrics (bar chart), recent healing actions table |
+| **Alerts** | Recurring failure table, alert history, on-demand anomaly check + daily report trigger |
 | **Failed Jobs** | Failed BullMQ jobs with error details, individual + bulk retry |
 | **Logs** | Filterable sync log viewer (by store, status); latest 100 entries |
 | **Health** | DB / Redis / Queue health checks, job count breakdown, live activity feed |
-| **Analytics** | 5 KPI cards (7d), success vs failed line chart (30d), failures bar chart (14d), store performance table |
-| **Alerts** | Recurring failure table, alert history, on-demand anomaly check + daily report trigger |
+| **Users** | User management — create, edit role, activate/deactivate, delete (admin only) |
+| **Audit Log** | Filterable audit trail — user actions, sync triggers, login history (admin only) |
 
 ### Quick Start
 
@@ -258,13 +271,25 @@ npm run dashboard:build
 npm start
 ```
 
-After building, navigate to `http://localhost:3000/dashboard/`. On first visit you'll be prompted for your API key (stored in `localStorage`).
+After building, navigate to `http://localhost:3000/dashboard/`. You'll see a login page — default credentials are `admin` / `admin123!` (set via `DEFAULT_ADMIN_PASSWORD` env var).
 
 ---
 
 ## API Reference
 
-All `/api/*` routes require `X-API-Key` header (if `API_KEY` is set).
+All `/api/*` routes require JWT Bearer token or `X-API-Key` header (if `API_KEY` is set).
+
+### Authentication
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `POST` | `/api/users/login` | Public | Login, returns JWT token |
+| `GET` | `/api/users/me` | Any role | Get current user profile |
+| `PUT` | `/api/users/me/password` | Any role | Change own password |
+| `GET` | `/api/users/` | Admin | List all users |
+| `POST` | `/api/users/` | Admin | Create a new user |
+| `PUT` | `/api/users/:id` | Admin | Update user (role, active, password) |
+| `DELETE` | `/api/users/:id` | Admin | Delete user |
 
 ### Health
 
@@ -324,6 +349,13 @@ All `/api/*` routes require `X-API-Key` header (if `API_KEY` is set).
 | `GET` | `/api/dashboard/alerts` | Alert history. Query: `?limit=50` |
 | `POST` | `/api/dashboard/anomaly/check` | Run anomaly checks on demand |
 | `POST` | `/api/dashboard/report/daily` | Trigger daily report now |
+| `GET` | `/api/dashboard/healing/history` | Self-healing action history. Query: `?limit=50` |
+| `GET` | `/api/dashboard/healing/stats` | Self-healing stats (7-day breakdown by action type) |
+| `POST` | `/api/dashboard/predictive/check` | Run predictive checks on demand (manager+) |
+| `GET` | `/api/dashboard/predictive/history` | Predictive metric history. Query: `?days=7` |
+| `GET` | `/api/dashboard/audit` | Audit logs (admin only). Filter: `?action=login&limit=50` |
+| `GET` | `/api/dashboard/audit/actions` | Distinct audit action types (admin only) |
+| `GET` | `/api/dashboard/insights` | Combined insights: healing stats + predictions + daily stats |
 
 ---
 
@@ -376,28 +408,34 @@ epos-woo-sync/
     ├── db/
     │   ├── db.js                 # MySQL connection pool
     │   ├── init.js               # Schema initializer
-    │   └── schema.sql            # DDL for all tables
+    │   └── schema.sql            # DDL for all tables (11 tables)
     ├── middleware/
-    │   └── auth.js               # API key middleware
+    │   ├── auth.js               # Legacy API key middleware
+    │   └── jwt-auth.js           # JWT auth + role-based access control
     ├── routes/
     │   ├── api.routes.js         # Admin / status / trigger routes
     │   ├── dashboard.routes.js   # Dashboard API endpoints
+    │   ├── user.routes.js        # User management + login routes
     │   └── webhook.routes.js     # Webhook routes
     ├── alerts/
     │   ├── alert.service.js      # Telegram + Email sender (debounced)
     │   ├── failure.detector.js   # Recurring failure tracker + escalation
     │   ├── analytics.js          # Sync metrics queries
     │   ├── anomaly.detector.js   # Spike / stale / zero-sync / backlog checks
-    │   └── daily.report.js       # 8 AM daily report cron
+    │   ├── daily.report.js       # 8 AM daily report cron
+    │   └── predictive.js         # Predictive alerts (trends, queue growth, degradation)
     ├── services/
     │   ├── epos.service.js       # EPOS Now API client (per-store)
     │   └── woo.service.js        # WooCommerce API client (per-store)
     ├── sync/
-    │   ├── sync.engine.js        # Core sync orchestrator
+    │   ├── sync.engine.js        # Core sync orchestrator (+ error classification + self-heal)
     │   ├── sync.queue.js         # BullMQ queue + job producers
-    │   └── sync.worker.js        # BullMQ worker process
+    │   ├── sync.worker.js        # BullMQ worker process (+ predictive checks)
+    │   └── self-healer.js        # Self-healing module (auto-fix common failures)
     ├── utils/
+    │   ├── audit.js              # Audit log service
     │   ├── cache.js              # Redis cache helper
+    │   ├── error-classifier.js   # Error type classification + retry strategies
     │   ├── logger.js             # File + console logging
     │   ├── matcher.js            # Product matching (SKU/barcode/name)
     │   └── sku.util.js           # SKU normalization
@@ -408,17 +446,21 @@ epos-woo-sync/
 │   ├── vite.config.js            # Vite config (Tailwind, proxy, base path)
 │   └── src/
 │       ├── main.jsx              # Entry point (BrowserRouter + Toaster)
-│       ├── App.jsx               # Sidebar layout + route definitions
-│       ├── api.js                # API helper (auto API key, 401 handling)
+│       ├── App.jsx               # Auth-gated sidebar layout + route definitions
+│       ├── api.js                # API helper (JWT + API key, 401 handling)
 │       ├── usePolling.js         # Custom polling hook
 │       └── pages/
+│           ├── Login.jsx         # JWT login page
 │           ├── Dashboard.jsx     # Stats + 7-day bar chart
 │           ├── Stores.jsx        # Store table + sync triggers
 │           ├── Analytics.jsx     # Line/bar charts + store performance
+│           ├── Insights.jsx      # Self-healing stats + predictive metrics
 │           ├── Alerts.jsx        # Recurring failures + alert history
 │           ├── FailedJobs.jsx    # Failed job list + retry
 │           ├── Logs.jsx          # Filterable sync log viewer
-│           └── Health.jsx        # Health checks + live activity
+│           ├── Health.jsx        # Health checks + live activity
+│           ├── Users.jsx         # User management (admin only)
+│           └── Audit.jsx         # Audit log viewer (admin only)
 ```
 
 ---
@@ -522,6 +564,10 @@ BullMQ worker with concurrency 5. Handles job types: `sync-all-stores`, `sync-st
 | `failure_logs` | Recurring failure tracking per SKU per store. Unique on `(store_id, sku)`. Tracks count, resolved flag. |
 | `sync_metrics` | Aggregated sync metrics per store per run. Used for analytics charts and daily reports. |
 | `alert_log` | Alert history with type, key, channel, and debounce support. |
+| `users` | User accounts with username, email, bcrypt password hash, role (admin/manager/viewer), active flag, last login. |
+| `audit_logs` | Full audit trail: user ID, action, resource, details (JSON), IP address, timestamp. |
+| `healing_logs` | Self-healing action history: store, SKU, action type, description, success flag. |
+| `predictive_metrics` | Time-series data for trend analysis: metric type, store, value, timestamp. |
 
 ---
 
@@ -579,13 +625,49 @@ POST /webhooks/product  (or legacy /webhooks/epos/:storeId/product-updated)
 
 ---
 
-## Error Handling
+## Error Handling & Self-Healing
 
-| HTTP Status | Behavior |
+### Error Classification
+
+Every sync error is automatically classified:
+
+| Type | Patterns | Action |
+|---|---|---|
+| `NETWORK` | ECONNREFUSED, timeout, 5xx | Retry (5s delay, up to 5 attempts) |
+| `AUTH` | 401, 403, invalid token | Stop + alert (no retry) |
+| `DATA` | 400, 422, invalid SKU, duplicate | Stop + log (trigger self-heal) |
+| `RATE_LIMIT` | 429, too many requests | Retry with 10s backoff (up to 8 attempts) |
+| `UNKNOWN` | Anything else | Retry (3s delay, up to 3 attempts) |
+
+### Self-Healing Actions
+
+| Action | Trigger | What It Does |
+|---|---|---|
+| `auto_create_mapping` | Missing mapping error | Creates a product_mappings row |
+| `generate_fallback_sku` | Product has no SKU/barcode | Generates `EPOS-{storeId}-{eposId}` |
+| `recreate_woo_product` | 404 on WooCommerce update | Clears stale mapping → next sync recreates |
+| `fix_duplicate_sku` | Duplicate SKU error | Appends store ID + timestamp to make unique |
+
+**Safety rules**: No destructive actions, 1-hour cooldown per SKU+action, all actions logged to `healing_logs`.
+
+### Predictive Alerts
+
+| Check | What It Detects |
 |---|---|
-| `5xx` / network | Retry (up to 3 attempts, exponential back-off) |
-| `400` | Permanent failure — `UnrecoverableError`, no retry |
-| `401` | Auth alert logged — `UnrecoverableError`, no retry |
+| Failure trend | Failures increasing day-over-day (3-day window) |
+| Queue growth | Queue size consistently growing across checks |
+| Store degradation | Recent sync duration > 2× historical average |
+| Rate limit approach | 3+ rate-limit hits per store in the last hour |
+
+Predictive checks run every 30 minutes in the worker + on-demand via API.
+
+### User Roles
+
+| Role | Permissions |
+|---|---|
+| `admin` | Full access: user CRUD, audit logs, all operations |
+| `manager` | Trigger syncs, manage stores, view everything |
+| `viewer` | Read-only dashboard access |
 
 ---
 

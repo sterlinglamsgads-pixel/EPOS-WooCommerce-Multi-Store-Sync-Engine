@@ -1,12 +1,11 @@
 const { Router }     = require('express');
-const { apiKeyAuth } = require('../middleware/auth');
 const db             = require('../db/db');
 const syncQueue      = require('../sync/sync.queue');
 const syncEngine     = require('../sync/sync.engine');
+const audit          = require('../utils/audit');
+const { requireAdmin, requireManager, requireViewer } = require('../middleware/jwt-auth');
 
 const router = Router();
-
-router.use(apiKeyAuth);
 
 // ------------------------------------------------------------------
 //  Stores CRUD
@@ -140,22 +139,24 @@ router.get('/sync/logs', async (req, res) => {
 //  Sync triggers
 // ------------------------------------------------------------------
 
-router.post('/sync/trigger', async (_req, res) => {
+router.post('/sync/trigger', requireManager, async (req, res) => {
   try {
     await syncQueue.addSyncAllStoresJob();
+    await audit.log(req, 'trigger_sync_all', 'sync', null, {});
     res.json({ message: 'Sync queued for all active stores' });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-router.post('/sync/trigger/:storeId', async (req, res) => {
+router.post('/sync/trigger/:storeId', requireManager, async (req, res) => {
   try {
     const storeId = parseInt(req.params.storeId, 10);
     const store   = await syncEngine.getStore(storeId);
     if (!store) return res.status(404).json({ error: 'Store not found' });
 
     await syncQueue.addSyncStoreJob(storeId);
+    await audit.log(req, 'trigger_sync_store', 'store', storeId, { storeName: store.name });
     res.json({ message: `Sync queued for store "${store.name}"` });
   } catch (err) {
     res.status(500).json({ error: err.message });

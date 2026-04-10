@@ -1,3 +1,4 @@
+import { useState, useEffect } from 'react';
 import { Routes, Route, NavLink, Navigate } from 'react-router-dom';
 import DashboardPage  from './pages/Dashboard';
 import StoresPage     from './pages/Stores';
@@ -6,18 +7,50 @@ import LogsPage       from './pages/Logs';
 import HealthPage     from './pages/Health';
 import AnalyticsPage  from './pages/Analytics';
 import AlertsPage     from './pages/Alerts';
+import UsersPage      from './pages/Users';
+import AuditPage      from './pages/Audit';
+import InsightsPage   from './pages/Insights';
+import LoginPage      from './pages/Login';
 
-const links = [
-  { to: '/',          label: 'Dashboard',   icon: '📊' },
-  { to: '/stores',    label: 'Stores',      icon: '🏪' },
-  { to: '/analytics', label: 'Analytics',   icon: '📈' },
-  { to: '/alerts',    label: 'Alerts',      icon: '🚨' },
-  { to: '/failed',    label: 'Failed Jobs', icon: '❌' },
-  { to: '/logs',      label: 'Logs',        icon: '📜' },
-  { to: '/health',    label: 'Health',      icon: '❤️' },
+const allLinks = [
+  { to: '/',          label: 'Dashboard',   icon: '📊', roles: ['admin','manager','viewer'] },
+  { to: '/stores',    label: 'Stores',      icon: '🏪', roles: ['admin','manager','viewer'] },
+  { to: '/analytics', label: 'Analytics',   icon: '📈', roles: ['admin','manager','viewer'] },
+  { to: '/insights',  label: 'Insights',    icon: '🧠', roles: ['admin','manager','viewer'] },
+  { to: '/alerts',    label: 'Alerts',      icon: '🚨', roles: ['admin','manager','viewer'] },
+  { to: '/failed',    label: 'Failed Jobs', icon: '❌', roles: ['admin','manager'] },
+  { to: '/logs',      label: 'Logs',        icon: '📜', roles: ['admin','manager'] },
+  { to: '/health',    label: 'Health',      icon: '❤️', roles: ['admin','manager'] },
+  { to: '/users',     label: 'Users',       icon: '👥', roles: ['admin'] },
+  { to: '/audit',     label: 'Audit Log',   icon: '📋', roles: ['admin'] },
 ];
 
 export default function App() {
+  const [user, setUser] = useState(() => {
+    try {
+      const stored = localStorage.getItem('user');
+      return stored ? JSON.parse(stored) : null;
+    } catch { return null; }
+  });
+
+  useEffect(() => {
+    const handler = () => setUser(null);
+    window.addEventListener('auth-required', handler);
+    return () => window.removeEventListener('auth-required', handler);
+  }, []);
+
+  const handleLogout = () => {
+    localStorage.removeItem('jwtToken');
+    localStorage.removeItem('user');
+    setUser(null);
+  };
+
+  if (!user) {
+    return <LoginPage onLogin={setUser} />;
+  }
+
+  const links = allLinks.filter(l => l.roles.includes(user.role));
+
   return (
     <div className="min-h-screen bg-gray-50 flex">
       {/* Sidebar */}
@@ -45,8 +78,17 @@ export default function App() {
             </NavLink>
           ))}
         </nav>
-        <div className="px-4 py-3 border-t border-gray-700 text-xs text-gray-500">
-          v4.0 — Phase 4
+        <div className="px-4 py-3 border-t border-gray-700">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm text-gray-300">{user.username}</p>
+              <p className="text-xs text-gray-500">{user.role}</p>
+            </div>
+            <button onClick={handleLogout} className="text-xs text-gray-400 hover:text-white transition-colors" title="Sign out">
+              ↪ Out
+            </button>
+          </div>
+          <p className="text-xs text-gray-500 mt-2">v5.0 — Phase 5</p>
         </div>
       </aside>
 
@@ -57,10 +99,13 @@ export default function App() {
             <Route path="/"          element={<DashboardPage />} />
             <Route path="/stores"    element={<StoresPage />} />
             <Route path="/analytics" element={<AnalyticsPage />} />
+            <Route path="/insights"  element={<InsightsPage />} />
             <Route path="/alerts"    element={<AlertsPage />} />
             <Route path="/failed"    element={<FailedPage />} />
             <Route path="/logs"      element={<LogsPage />} />
             <Route path="/health"    element={<HealthPage />} />
+            <Route path="/users"     element={<UsersPage />} />
+            <Route path="/audit"     element={<AuditPage />} />
             <Route path="*"          element={<Navigate to="/" replace />} />
           </Routes>
         </div>

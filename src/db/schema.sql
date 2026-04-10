@@ -143,3 +143,78 @@ CREATE TABLE IF NOT EXISTS alert_log (
   INDEX idx_type_key  (alert_type, alert_key),
   INDEX idx_sent      (sent_at)
 ) ENGINE=InnoDB;
+
+-- ---------------------------------------------------------
+--  Users (JWT auth + role-based access)
+-- ---------------------------------------------------------
+CREATE TABLE IF NOT EXISTS users (
+  id            INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  username      VARCHAR(100) NOT NULL,
+  email         VARCHAR(255) NOT NULL,
+  password_hash VARCHAR(255) NOT NULL,
+  role          ENUM('admin','manager','viewer') NOT NULL DEFAULT 'viewer',
+  is_active     TINYINT(1) NOT NULL DEFAULT 1,
+  last_login    DATETIME DEFAULT NULL,
+  created_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+
+  UNIQUE KEY uq_username (username),
+  UNIQUE KEY uq_email    (email)
+) ENGINE=InnoDB;
+
+-- ---------------------------------------------------------
+--  Audit log (tracks every user action)
+-- ---------------------------------------------------------
+CREATE TABLE IF NOT EXISTS audit_logs (
+  id         BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  user_id    INT UNSIGNED DEFAULT NULL,
+  username   VARCHAR(100) DEFAULT NULL,
+  action     VARCHAR(100) NOT NULL,
+  resource   VARCHAR(100) DEFAULT NULL,
+  resource_id VARCHAR(255) DEFAULT NULL,
+  details    JSON DEFAULT NULL,
+  ip_address VARCHAR(45) DEFAULT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+  INDEX idx_user     (user_id),
+  INDEX idx_action   (action),
+  INDEX idx_resource (resource, resource_id),
+  INDEX idx_created  (created_at),
+
+  CONSTRAINT fk_audit_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
+) ENGINE=InnoDB;
+
+-- ---------------------------------------------------------
+--  Self-healing action log
+-- ---------------------------------------------------------
+CREATE TABLE IF NOT EXISTS healing_logs (
+  id            INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  store_id      INT UNSIGNED NOT NULL,
+  sku           VARCHAR(255) DEFAULT NULL,
+  action_type   VARCHAR(100) NOT NULL,
+  description   TEXT,
+  success       TINYINT(1) NOT NULL DEFAULT 0,
+  created_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+  INDEX idx_store   (store_id),
+  INDEX idx_action  (action_type),
+  INDEX idx_created (created_at),
+
+  CONSTRAINT fk_healing_store FOREIGN KEY (store_id) REFERENCES stores(id) ON DELETE CASCADE
+) ENGINE=InnoDB;
+
+-- ---------------------------------------------------------
+--  Predictive metrics (trend tracking)
+-- ---------------------------------------------------------
+CREATE TABLE IF NOT EXISTS predictive_metrics (
+  id             INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  metric_type    VARCHAR(100) NOT NULL,
+  store_id       INT UNSIGNED DEFAULT NULL,
+  value          FLOAT NOT NULL,
+  recorded_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+  INDEX idx_type_store (metric_type, store_id),
+  INDEX idx_recorded   (recorded_at),
+
+  CONSTRAINT fk_predictive_store FOREIGN KEY (store_id) REFERENCES stores(id) ON DELETE CASCADE
+) ENGINE=InnoDB;
