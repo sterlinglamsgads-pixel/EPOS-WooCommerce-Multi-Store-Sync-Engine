@@ -10,6 +10,7 @@ const apiRoutes      = require('./routes/api.routes');
 const dashRoutes     = require('./routes/dashboard.routes');
 const webhookRoutes  = require('./routes/webhook.routes');
 const syncJob        = require('./cron/sync.job');
+const dailyReport    = require('./alerts/daily.report');
 
 const app = express();
 
@@ -53,6 +54,7 @@ app.get('/dashboard/*', (_req, res) => {
 app.listen(config.port, () => {
   logger.info(`[APP] Server listening on port ${config.port}`);
   syncJob.start();
+  dailyReport.start();
   logger.info('[APP] System ready');
 });
 

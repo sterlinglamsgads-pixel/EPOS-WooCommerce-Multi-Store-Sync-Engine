@@ -4,6 +4,10 @@ const db             = require('../db/db');
 const syncQueue      = require('../sync/sync.queue');
 const cache          = require('../utils/cache');
 const logger         = require('../utils/logger');
+const analytics      = require('../alerts/analytics');
+const failureDetector = require('../alerts/failure.detector');
+const anomalyDetector = require('../alerts/anomaly.detector');
+const dailyReport    = require('../alerts/daily.report');
 
 const router = Router();
 router.use(apiKeyAuth);
@@ -231,6 +235,118 @@ router.get('/activity', async (_req, res) => {
     ].sort((a, b) => (b.ts || 0) - (a.ts || 0)).slice(0, 20);
 
     res.json({ items });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ------------------------------------------------------------------
+//  Analytics: success rate over time
+// ------------------------------------------------------------------
+
+router.get('/analytics/success-rate', async (req, res) => {
+  try {
+    const days = Math.min(parseInt(req.query.days, 10) || 30, 90);
+    const data = await analytics.getSuccessRateOverTime(days);
+    res.json({ data });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ------------------------------------------------------------------
+//  Analytics: failures over time
+// ------------------------------------------------------------------
+
+router.get('/analytics/failures', async (req, res) => {
+  try {
+    const days = Math.min(parseInt(req.query.days, 10) || 14, 90);
+    const data = await analytics.getFailuresOverTime(days);
+    res.json({ data });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ------------------------------------------------------------------
+//  Analytics: store performance comparison
+// ------------------------------------------------------------------
+
+router.get('/analytics/store-performance', async (_req, res) => {
+  try {
+    const data = await analytics.getStorePerformance();
+    res.json({ data });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ------------------------------------------------------------------
+//  Analytics: daily stats
+// ------------------------------------------------------------------
+
+router.get('/analytics/daily-stats', async (req, res) => {
+  try {
+    const days = parseInt(req.query.days, 10) || 1;
+    const data = await analytics.getDailyStats(days);
+    res.json({ data });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ------------------------------------------------------------------
+//  Failure logs (recurring failures)
+// ------------------------------------------------------------------
+
+router.get('/failures', async (req, res) => {
+  try {
+    const storeId = req.query.store_id ? parseInt(req.query.store_id, 10) : null;
+    const data = await failureDetector.getOpenFailures(storeId);
+    res.json({ failures: data });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ------------------------------------------------------------------
+//  Run anomaly checks on demand
+// ------------------------------------------------------------------
+
+router.post('/anomaly/check', async (_req, res) => {
+  try {
+    const results = await anomalyDetector.runChecks();
+    res.json({ anomalies: results });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ------------------------------------------------------------------
+//  Trigger daily report on demand
+// ------------------------------------------------------------------
+
+router.post('/report/daily', async (_req, res) => {
+  try {
+    await dailyReport.sendDailyReport();
+    res.json({ sent: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ------------------------------------------------------------------
+//  Alert history
+// ------------------------------------------------------------------
+
+router.get('/alerts', async (req, res) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit, 10) || 50, 200);
+    const rows = await db.query(
+      'SELECT * FROM alert_log ORDER BY sent_at DESC LIMIT ?',
+      [limit]
+    );
+    res.json({ alerts: rows });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

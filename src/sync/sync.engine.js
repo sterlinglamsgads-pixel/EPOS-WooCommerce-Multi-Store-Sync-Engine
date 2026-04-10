@@ -7,6 +7,8 @@ const db                     = require('../db/db');
 const cache                  = require('../utils/cache');
 const syncQueue              = require('./sync.queue');
 const config                 = require('../config');
+const failureDetector        = require('../alerts/failure.detector');
+const analytics              = require('../alerts/analytics');
 
 // ------------------------------------------------------------------
 //  Store helpers
@@ -189,6 +191,7 @@ async function syncProduct(data) {
       });
       await upsertMapping(storeId, eposProduct, { id: mapping.woo_product_id }, mapping.match_method || 'sku');
       await logSync(storeId, sku, 'update', 'success', `Updated WOO#${mapping.woo_product_id}`);
+      await failureDetector.markResolved(storeId, sku);
       return { action: 'update', wooProductId: mapping.woo_product_id };
     }
 
@@ -213,6 +216,7 @@ async function syncProduct(data) {
       });
       await upsertMapping(storeId, eposProduct, wooProduct, 'sku');
       await logSync(storeId, sku, 'link', 'success', `Linked & updated WOO#${wooProduct.id}`);
+      await failureDetector.markResolved(storeId, sku);
       return { action: 'link', wooProductId: wooProduct.id };
     }
 
@@ -237,15 +241,18 @@ async function syncProduct(data) {
     });
     await upsertMapping(storeId, eposProduct, newProduct, 'sku');
     await logSync(storeId, sku, 'create', 'success', `Created WOO#${newProduct.id}`);
+    await failureDetector.markResolved(storeId, sku);
     return { action: 'create', wooProductId: newProduct.id };
 
   } catch (err) {
     await logSync(storeId, sku, 'sync', 'failed', err.message);
+    await failureDetector.trackFailure(storeId, sku, err.message);
 
     // Smart error handling based on HTTP status
     const status = err.response?.status;
     if (status === 401) {
       logger.error(`[SYNC] Store ${storeId}: AUTH FAILURE — check WooCommerce credentials`);
+      await failureDetector.authFailure(storeId, store.name);
       throw new UnrecoverableError(`Auth failure (401): ${err.message}`);
     }
     if (status === 400) {

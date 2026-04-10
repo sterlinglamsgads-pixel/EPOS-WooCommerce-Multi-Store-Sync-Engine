@@ -26,15 +26,23 @@ async function request(path, opts = {}) {
 }
 
 export const api = {
-  getSummary:    ()          => request('/summary'),
-  getStores:     ()          => request('/stores'),
-  getFailedJobs: ()          => request('/jobs/failed'),
-  retryJob:      (id)        => request(`/jobs/retry/${encodeURIComponent(id)}`, { method: 'POST' }),
-  retryAll:      ()          => request('/jobs/retry-all', { method: 'POST' }),
-  getLogs:       (params)    => request(`/logs?${new URLSearchParams(params)}`),
-  getHealth:     ()          => request('/health'),
-  getActivity:   ()          => request('/activity'),
-  triggerSync:   (storeId)   => {
+  getSummary:         ()          => request('/summary'),
+  getStores:          ()          => request('/stores'),
+  getFailedJobs:      ()          => request('/jobs/failed'),
+  retryJob:           (id)        => request(`/jobs/retry/${encodeURIComponent(id)}`, { method: 'POST' }),
+  retryAll:           ()          => request('/jobs/retry-all', { method: 'POST' }),
+  getLogs:            (params)    => request(`/logs?${new URLSearchParams(params)}`),
+  getHealth:          ()          => request('/health'),
+  getActivity:        ()          => request('/activity'),
+  getSuccessRate:     (days = 30) => request(`/analytics/success-rate?days=${days}`),
+  getFailuresOverTime:(days = 14) => request(`/analytics/failures?days=${days}`),
+  getStorePerformance:()          => request('/analytics/store-performance'),
+  getDailyStats:      (days = 1)  => request(`/analytics/daily-stats?days=${days}`),
+  getFailures:        (storeId)   => request(`/failures${storeId ? `?store_id=${storeId}` : ''}`),
+  runAnomalyCheck:    ()          => request('/anomaly/check', { method: 'POST' }),
+  sendDailyReport:    ()          => request('/report/daily', { method: 'POST' }),
+  getAlerts:          (limit = 50)=> request(`/alerts?limit=${limit}`),
+  triggerSync:        (storeId)   => {
     const base = '/api';
     const headers = { 'Content-Type': 'application/json' };
     const key = localStorage.getItem('apiKey');

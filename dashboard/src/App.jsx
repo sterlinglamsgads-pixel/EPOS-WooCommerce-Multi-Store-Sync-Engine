@@ -1,16 +1,20 @@
 import { Routes, Route, NavLink, Navigate } from 'react-router-dom';
-import DashboardPage from './pages/Dashboard';
-import StoresPage    from './pages/Stores';
-import FailedPage    from './pages/FailedJobs';
-import LogsPage      from './pages/Logs';
-import HealthPage    from './pages/Health';
+import DashboardPage  from './pages/Dashboard';
+import StoresPage     from './pages/Stores';
+import FailedPage     from './pages/FailedJobs';
+import LogsPage       from './pages/Logs';
+import HealthPage     from './pages/Health';
+import AnalyticsPage  from './pages/Analytics';
+import AlertsPage     from './pages/Alerts';
 
 const links = [
-  { to: '/',        label: 'Dashboard',   icon: '📊' },
-  { to: '/stores',  label: 'Stores',      icon: '🏪' },
-  { to: '/failed',  label: 'Failed Jobs', icon: '❌' },
-  { to: '/logs',    label: 'Logs',        icon: '📜' },
-  { to: '/health',  label: 'Health',      icon: '❤️' },
+  { to: '/',          label: 'Dashboard',   icon: '📊' },
+  { to: '/stores',    label: 'Stores',      icon: '🏪' },
+  { to: '/analytics', label: 'Analytics',   icon: '📈' },
+  { to: '/alerts',    label: 'Alerts',      icon: '🚨' },
+  { to: '/failed',    label: 'Failed Jobs', icon: '❌' },
+  { to: '/logs',      label: 'Logs',        icon: '📜' },
+  { to: '/health',    label: 'Health',      icon: '❤️' },
 ];
 
 export default function App() {
@@ -42,7 +46,7 @@ export default function App() {
           ))}
         </nav>
         <div className="px-4 py-3 border-t border-gray-700 text-xs text-gray-500">
-          v3.0 — Phase 3
+          v4.0 — Phase 4
         </div>
       </aside>
 
@@ -50,12 +54,14 @@ export default function App() {
       <main className="flex-1 overflow-y-auto">
         <div className="max-w-7xl mx-auto p-6">
           <Routes>
-            <Route path="/"       element={<DashboardPage />} />
-            <Route path="/stores" element={<StoresPage />} />
-            <Route path="/failed" element={<FailedPage />} />
-            <Route path="/logs"   element={<LogsPage />} />
-            <Route path="/health" element={<HealthPage />} />
-            <Route path="*"       element={<Navigate to="/" replace />} />
+            <Route path="/"          element={<DashboardPage />} />
+            <Route path="/stores"    element={<StoresPage />} />
+            <Route path="/analytics" element={<AnalyticsPage />} />
+            <Route path="/alerts"    element={<AlertsPage />} />
+            <Route path="/failed"    element={<FailedPage />} />
+            <Route path="/logs"      element={<LogsPage />} />
+            <Route path="/health"    element={<HealthPage />} />
+            <Route path="*"          element={<Navigate to="/" replace />} />
           </Routes>
         </div>
       </main>

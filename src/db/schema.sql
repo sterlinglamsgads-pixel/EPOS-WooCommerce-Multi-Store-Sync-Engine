@@ -89,3 +89,57 @@ CREATE TABLE IF NOT EXISTS sync_runs (
 
   CONSTRAINT fk_run_store FOREIGN KEY (store_id) REFERENCES stores(id) ON DELETE SET NULL
 ) ENGINE=InnoDB;
+
+-- ---------------------------------------------------------
+--  Failure tracking (recurring failures per SKU)
+-- ---------------------------------------------------------
+CREATE TABLE IF NOT EXISTS failure_logs (
+  id            INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  store_id      INT UNSIGNED NOT NULL,
+  sku           VARCHAR(255) DEFAULT NULL,
+  error         TEXT,
+  fail_count    INT UNSIGNED NOT NULL DEFAULT 1,
+  first_seen    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  last_occurred DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  resolved      TINYINT(1) NOT NULL DEFAULT 0,
+
+  UNIQUE KEY uq_store_sku (store_id, sku),
+  INDEX idx_store (store_id),
+  INDEX idx_resolved (resolved),
+
+  CONSTRAINT fk_failure_store FOREIGN KEY (store_id) REFERENCES stores(id) ON DELETE CASCADE
+) ENGINE=InnoDB;
+
+-- ---------------------------------------------------------
+--  Sync metrics (aggregated per store per run)
+-- ---------------------------------------------------------
+CREATE TABLE IF NOT EXISTS sync_metrics (
+  id            INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  store_id      INT UNSIGNED NOT NULL,
+  total_synced  INT UNSIGNED NOT NULL DEFAULT 0,
+  total_failed  INT UNSIGNED NOT NULL DEFAULT 0,
+  total_created INT UNSIGNED NOT NULL DEFAULT 0,
+  total_skipped INT UNSIGNED NOT NULL DEFAULT 0,
+  avg_duration  FLOAT DEFAULT NULL,
+  created_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+  INDEX idx_store   (store_id),
+  INDEX idx_created (created_at),
+
+  CONSTRAINT fk_metric_store FOREIGN KEY (store_id) REFERENCES stores(id) ON DELETE CASCADE
+) ENGINE=InnoDB;
+
+-- ---------------------------------------------------------
+--  Alert log (prevents duplicate spam)
+-- ---------------------------------------------------------
+CREATE TABLE IF NOT EXISTS alert_log (
+  id         INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  alert_type VARCHAR(100) NOT NULL,
+  alert_key  VARCHAR(255) NOT NULL,
+  message    TEXT,
+  channel    VARCHAR(50) DEFAULT 'telegram',
+  sent_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+  INDEX idx_type_key  (alert_type, alert_key),
+  INDEX idx_sent      (sent_at)
+) ENGINE=InnoDB;

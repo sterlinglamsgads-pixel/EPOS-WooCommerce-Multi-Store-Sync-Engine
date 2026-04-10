@@ -42,4 +42,14 @@ module.exports = {
     user: process.env.DASHBOARD_USER || '',
     pass: process.env.DASHBOARD_PASS || '',
   },
+
+  alerts: {
+    telegramBotToken: process.env.TELEGRAM_BOT_TOKEN || '',
+    telegramChatId:   process.env.TELEGRAM_CHAT_ID || '',
+    smtpHost:         process.env.SMTP_HOST || '',
+    smtpPort:         parseInt(process.env.SMTP_PORT, 10) || 587,
+    smtpUser:         process.env.SMTP_USER || '',
+    smtpPass:         process.env.SMTP_PASS || '',
+    emailTo:          process.env.ALERT_EMAIL_TO || '',
+  },
 };

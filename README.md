@@ -1,6 +1,6 @@
 # EPOS ↔ WooCommerce Multi-Store Sync Engine
 
-Production-grade product synchronization between **EPOS Now** and **WooCommerce** for a multi-store business. Supports real-time webhooks, scheduled sync, queue-based processing with BullMQ, and independent per-store configuration.
+Production-grade product synchronization between **EPOS Now** and **WooCommerce** for a multi-store business. Supports real-time webhooks, scheduled sync, queue-based processing with BullMQ, automated alerts (Telegram / Email), failure detection, sync analytics, anomaly detection, and a React admin dashboard.
 
 ---
 
@@ -19,6 +19,7 @@ Production-grade product synchronization between **EPOS Now** and **WooCommerce*
 - [Module Reference](#module-reference)
 - [Database Schema](#database-schema)
 - [Sync Flow](#sync-flow)
+- [Alerts & Intelligence](#alerts--intelligence)
 
 ---
 
@@ -42,6 +43,11 @@ Production-grade product synchronization between **EPOS Now** and **WooCommerce*
 - **Detailed logging** — per-product logs to file and database; per-run aggregate stats
 - **Admin dashboard** — React-based monitoring UI with real-time store overview, failed job management, log viewer, and system health checks
 - **Dashboard polling** — auto-refreshing stats, charts, and live queue activity feed
+- **Alert system** — Telegram Bot API + Email (nodemailer) with debounce to prevent spam
+- **Failure detection** — recurring failure tracking per SKU; auto-escalation at 3 and 10 failures
+- **Sync analytics** — per-store metrics: synced, failed, created, skipped, avg duration
+- **Daily reports** — cron job (8 AM) sends daily summary via Telegram / Email
+- **Anomaly detection** — failure spikes, stale stores, zero-sync days, queue backlog alerts
 
 ---
 
@@ -185,6 +191,17 @@ All configuration via `.env`:
 | `LOG_LEVEL` | `info` or `debug` | `info` |
 | `DASHBOARD_USER` | Dashboard basic-auth username | — |
 | `DASHBOARD_PASS` | Dashboard basic-auth password | — |
+| `TELEGRAM_BOT_TOKEN` | Telegram bot token for alerts | — |
+| `TELEGRAM_CHAT_ID` | Telegram chat ID for alerts | — |
+| `SMTP_HOST` | SMTP server for email alerts | — |
+| `SMTP_PORT` | SMTP port | `587` |
+| `SMTP_USER` | SMTP username | — |
+| `SMTP_PASS` | SMTP password | — |
+| `ALERT_EMAIL_TO` | Email recipient for alerts | — |
+| `ALERT_COOLDOWN_MINUTES` | Alert debounce window | `30` |
+| `QUEUE_BACKLOG_THRESHOLD` | Alert if waiting > N jobs | `1000` |
+| `STALE_SYNC_HOURS` | Alert if store not synced in N hours | `24` |
+| `DAILY_REPORT_CRON` | Daily report cron expression | `0 8 * * *` |
 
 Per-store EPOS API URL and token can be overridden in the `stores` table. WooCommerce credentials are always per-store.
 
@@ -227,6 +244,8 @@ A built-in React monitoring UI served at `/dashboard/` by the Express server.
 | **Failed Jobs** | Failed BullMQ jobs with error details, individual + bulk retry |
 | **Logs** | Filterable sync log viewer (by store, status); latest 100 entries |
 | **Health** | DB / Redis / Queue health checks, job count breakdown, live activity feed |
+| **Analytics** | 5 KPI cards (7d), success vs failed line chart (30d), failures bar chart (14d), store performance table |
+| **Alerts** | Recurring failure table, alert history, on-demand anomaly check + daily report trigger |
 
 ### Quick Start
 
@@ -297,6 +316,14 @@ All `/api/*` routes require `X-API-Key` header (if `API_KEY` is set).
 | `GET` | `/api/dashboard/logs` | Sync logs with store name. Filter: `?store_id=1&status=failed` |
 | `GET` | `/api/dashboard/health` | DB, Redis, Queue health status + job counts |
 | `GET` | `/api/dashboard/activity` | Live feed of active/waiting/completed jobs |
+| `GET` | `/api/dashboard/analytics/success-rate` | Synced/failed/created per day. Query: `?days=30` |
+| `GET` | `/api/dashboard/analytics/failures` | Failures per day. Query: `?days=14` |
+| `GET` | `/api/dashboard/analytics/store-performance` | Per-store stats (30 days) |
+| `GET` | `/api/dashboard/analytics/daily-stats` | Aggregate stats. Query: `?days=1` |
+| `GET` | `/api/dashboard/failures` | Open recurring failures. Filter: `?store_id=1` |
+| `GET` | `/api/dashboard/alerts` | Alert history. Query: `?limit=50` |
+| `POST` | `/api/dashboard/anomaly/check` | Run anomaly checks on demand |
+| `POST` | `/api/dashboard/report/daily` | Trigger daily report now |
 
 ---
 
@@ -356,6 +383,12 @@ epos-woo-sync/
     │   ├── api.routes.js         # Admin / status / trigger routes
     │   ├── dashboard.routes.js   # Dashboard API endpoints
     │   └── webhook.routes.js     # Webhook routes
+    ├── alerts/
+    │   ├── alert.service.js      # Telegram + Email sender (debounced)
+    │   ├── failure.detector.js   # Recurring failure tracker + escalation
+    │   ├── analytics.js          # Sync metrics queries
+    │   ├── anomaly.detector.js   # Spike / stale / zero-sync / backlog checks
+    │   └── daily.report.js       # 8 AM daily report cron
     ├── services/
     │   ├── epos.service.js       # EPOS Now API client (per-store)
     │   └── woo.service.js        # WooCommerce API client (per-store)
@@ -381,6 +414,8 @@ epos-woo-sync/
 │       └── pages/
 │           ├── Dashboard.jsx     # Stats + 7-day bar chart
 │           ├── Stores.jsx        # Store table + sync triggers
+│           ├── Analytics.jsx     # Line/bar charts + store performance
+│           ├── Alerts.jsx        # Recurring failures + alert history
 │           ├── FailedJobs.jsx    # Failed job list + retry
 │           ├── Logs.jsx          # Filterable sync log viewer
 │           └── Health.jsx        # Health checks + live activity
@@ -484,6 +519,9 @@ BullMQ worker with concurrency 5. Handles job types: `sync-all-stores`, `sync-st
 | `product_mappings` | Per-store EPOS ↔ WooCommerce product links. Unique on `(store_id, epos_product_id)`. Tracks match method. |
 | `sync_logs` | Append-only log of every sync action per product (success/failed/skipped). |
 | `sync_runs` | One row per store sync invocation with aggregate stats and timestamps. |
+| `failure_logs` | Recurring failure tracking per SKU per store. Unique on `(store_id, sku)`. Tracks count, resolved flag. |
+| `sync_metrics` | Aggregated sync metrics per store per run. Used for analytics charts and daily reports. |
+| `alert_log` | Alert history with type, key, channel, and debounce support. |
 
 ---
 
@@ -548,6 +586,53 @@ POST /webhooks/product  (or legacy /webhooks/epos/:storeId/product-updated)
 | `5xx` / network | Retry (up to 3 attempts, exponential back-off) |
 | `400` | Permanent failure — `UnrecoverableError`, no retry |
 | `401` | Auth alert logged — `UnrecoverableError`, no retry |
+
+---
+
+## Alerts & Intelligence
+
+### Alert Channels
+
+| Channel | Config | Description |
+|---|---|---|
+| **Telegram** | `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` | Recommended. Instant push via Bot API. |
+| **Email** | `SMTP_*` + `ALERT_EMAIL_TO` | Optional. Via nodemailer (SMTP). |
+
+Both channels fire simultaneously when configured. Alerts are **debounced** — the same `(alert_type, alert_key)` pair won't repeat within `ALERT_COOLDOWN_MINUTES` (default 30).
+
+### Alert Triggers
+
+| Alert | Condition | Severity |
+|---|---|---|
+| Repeated failure | Same SKU fails 3 times | Warning |
+| Critical failure | Same SKU fails 10+ times | Critical |
+| Store sync failed | A `sync-store` job exhausts retries | Error |
+| Auth failure | WooCommerce returns HTTP 401 | Critical |
+| Queue backlog | Waiting jobs > `QUEUE_BACKLOG_THRESHOLD` | Warning |
+| Failure spike | Today's failures > 2× yesterday | Anomaly |
+| Stale store | Active store not synced in N hours | Anomaly |
+| Zero sync | No products synced today | Anomaly |
+
+### Daily Report
+
+Runs at 8 AM (configurable via `DAILY_REPORT_CRON`). Sends a summary:
+
+```
+📊 Daily Sync Report
+
+Stores active: 3
+Products synced: 847
+Products created: 12
+Failed: 5
+Success rate: 99%
+Avg duration: 1.2s
+```
+
+Trigger on-demand: `POST /api/dashboard/report/daily`
+
+### Anomaly Detection
+
+Runs automatically after the daily report. Also available on-demand: `POST /api/dashboard/anomaly/check`.
 
 ---
 

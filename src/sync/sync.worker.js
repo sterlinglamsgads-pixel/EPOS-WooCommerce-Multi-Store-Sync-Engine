@@ -7,6 +7,8 @@ const syncEngine     = require('./sync.engine');
 const logger         = require('../utils/logger');
 const db             = require('../db/db');
 const cache          = require('../utils/cache');
+const failureDetector = require('../alerts/failure.detector');
+const anomalyDetector = require('../alerts/anomaly.detector');
 
 // Rate-limit delay (ms) between product sync jobs
 const RATE_LIMIT_MS = parseInt(process.env.SYNC_RATE_LIMIT_MS, 10) || 200;
@@ -54,7 +56,22 @@ worker.on('failed', (job, err) => {
     `[WORKER] ${job.name}#${job.id} failed ` +
     `(attempt ${job.attemptsMade}/${job.opts.attempts}): ${err.message}`
   );
+
+  // Alert if final attempt
+  if (job.attemptsMade >= (job.opts.attempts || 3)) {
+    const sku     = job.data.eposProduct?.sku || job.data.sku || 'unknown';
+    const storeId = job.data.storeId || '?';
+
+    if (job.name === 'sync-store') {
+      failureDetector.storeFailure(storeId, job.data.storeName || storeId, err.message);
+    }
+  }
 });
+
+// Periodic queue backlog check (every 5 minutes)
+setInterval(() => {
+  anomalyDetector.checkQueueBacklog().catch(() => {});
+}, 5 * 60 * 1000);
 
 // ------------------------------------------------------------------
 //  Graceful shutdown
