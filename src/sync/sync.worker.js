@@ -8,6 +8,13 @@ const logger         = require('../utils/logger');
 const db             = require('../db/db');
 const cache          = require('../utils/cache');
 
+// Rate-limit delay (ms) between product sync jobs
+const RATE_LIMIT_MS = parseInt(process.env.SYNC_RATE_LIMIT_MS, 10) || 200;
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 const worker = new Worker(QUEUE_NAME, async (job) => {
   logger.info(`[WORKER] Processing ${job.name}#${job.id}`);
 
@@ -20,8 +27,12 @@ const worker = new Worker(QUEUE_NAME, async (job) => {
         dryRun: job.data.dryRun || false,
       });
 
-    case 'sync-product':
-      return syncEngine.syncProduct(job.data);
+    case 'sync-product': {
+      const result = await syncEngine.syncProduct(job.data);
+      // Rate-limit between product syncs to avoid API throttling
+      await sleep(RATE_LIMIT_MS);
+      return result;
+    }
 
     case 'webhook-sync':
       return syncEngine.syncProductFromWebhook(job.data);

@@ -12,6 +12,7 @@ Production-grade product synchronization between **EPOS Now** and **WooCommerce*
 - [Setup Guide](#setup-guide)
 - [Configuration](#configuration)
 - [Running the System](#running-the-system)
+- [Admin Dashboard](#admin-dashboard)
 - [API Reference](#api-reference)
 - [Webhook Endpoints](#webhook-endpoints)
 - [Project Structure](#project-structure)
@@ -24,18 +25,23 @@ Production-grade product synchronization between **EPOS Now** and **WooCommerce*
 ## Features
 
 - **Multi-store** — each store syncs independently with its own WooCommerce instance
-- **Queue-driven** — BullMQ with Redis for reliable, concurrent job processing
-- **Real-time webhooks** — instant sync on product changes from WooCommerce or EPOS
+- **Fully queue-driven** — every product sync goes through BullMQ (NEVER called directly)
+- **Mapping-driven** — check `product_mappings` → update if mapped, search & link if found, create if new
+- **Delta sync** — incremental fetch using `last_synced_at` per store (only changed products)
+- **Real-time webhooks** — instant sync on product changes; unified `/webhooks/product` endpoint
 - **Scheduled sync** — configurable cron interval (default every 10 minutes)
-- **Batch updates** — WooCommerce batch API (up to 100 products per request)
-- **Smart matching** — products matched by SKU → Barcode → Name (priority order)
-- **Retry with back-off** — exponential retry (3 attempts); permanent failures (HTTP 400) skip retry
+- **Per-product queuing** — `syncStore` queues individual `sync-product` jobs (no batch coupling)
+- **Rate limiting** — configurable delay between product syncs to avoid API throttling
+- **Smart error handling** — 500=retry, 400=permanent fail, 401=auth alert (no retry)
+- **Retry with back-off** — exponential retry (3 attempts, 2s base) via BullMQ
 - **Dry-run mode** — preview all changes without writing to WooCommerce
-- **Redis caching** — product lookups cached with 5-minute TTL
+- **Redis caching** — product lookups cached with 5-minute TTL (skipped during delta fetch)
 - **Sync direction** — configurable per store: `EPOS_TO_WOO`, `WOO_TO_EPOS`, `BIDIRECTIONAL`
 - **API key auth** — protect admin routes with `X-API-Key` header
 - **Webhook signature verification** — HMAC-SHA256 validation for both WooCommerce and EPOS
 - **Detailed logging** — per-product logs to file and database; per-run aggregate stats
+- **Admin dashboard** — React-based monitoring UI with real-time store overview, failed job management, log viewer, and system health checks
+- **Dashboard polling** — auto-refreshing stats, charts, and live queue activity feed
 
 ---
 
@@ -53,19 +59,19 @@ Production-grade product synchronization between **EPOS Now** and **WooCommerce*
                     ▼                ▼                ▼
              sync-all-stores   sync-store       sync-product
                     │                │                │
-                    │    ┌───────────┴──────────┐     │
-                    │    │  EPOS API   WOO API  │     │
-                    │    └───────────┬──────────┘     │
-                    │                ▼                 │
-                    │          Match & Diff            │
-                    │                │                 │
-                    │         Batch Update ────────────┘
-                    │                │
-                    ▼                ▼
-               ┌─────────┐   ┌───────────┐
-               │  MySQL   │   │   Redis   │
-               │ (state)  │   │  (cache)  │
-               └─────────┘   └───────────┘
+                    │         delta fetch        mapping check
+                    │         (EPOS API)              │
+                    │                │          ┌─────┴──────┐
+                    │         queue per-product  │  mapped?   │
+                    │         sync-product jobs  ├─ yes→UPDATE│
+                    │                │           ├─ SKU→ LINK │
+                    │                │           └─ no → CREATE
+                    │                │                │
+                    ▼                ▼                ▼
+               ┌─────────┐   ┌───────────┐   ┌───────────┐
+               │  MySQL   │   │   Redis   │   │ WOO API   │
+               │ (state)  │   │  (cache)  │   │ (writes)  │
+               └─────────┘   └───────────┘   └───────────┘
 ```
 
 ---
@@ -174,8 +180,11 @@ All configuration via `.env`:
 | `DRY_RUN` | Disable WooCommerce writes | `false` |
 | `WEBHOOK_SECRET` | EPOS webhook HMAC secret | _(skip verification)_ |
 | `WOO_WEBHOOK_SECRET` | WooCommerce webhook HMAC secret | _(skip verification)_ |
+| `SYNC_RATE_LIMIT_MS` | Delay (ms) between product sync jobs | `200` |
 | `LOG_DIR` | Log file directory | `./logs` |
 | `LOG_LEVEL` | `info` or `debug` | `info` |
+| `DASHBOARD_USER` | Dashboard basic-auth username | — |
+| `DASHBOARD_PASS` | Dashboard basic-auth password | — |
 
 Per-store EPOS API URL and token can be overridden in the `stores` table. WooCommerce credentials are always per-store.
 
@@ -190,8 +199,47 @@ Per-store EPOS API URL and token can be overridden in the `stores` table. WooCom
 | `sync:once` | `npm run sync:once` | One-shot sync of all stores, then exit |
 | `sync:dry` | `npm run sync:dry` | Dry-run sync (no WooCommerce writes) |
 | `db:init` | `npm run db:init` | Initialize database schema |
+| `dashboard:dev` | `npm run dashboard:dev` | Start dashboard dev server (Vite, port 5173) |
+| `dashboard:build` | `npm run dashboard:build` | Build dashboard for production |
 
 Sync a single store: `node src/run-once.js <storeId>`
+
+---
+
+## Admin Dashboard
+
+A built-in React monitoring UI served at `/dashboard/` by the Express server.
+
+### Tech Stack
+
+- **React 19** + **Vite** — fast dev & optimized production builds
+- **Tailwind CSS v4** — utility-first styling
+- **Recharts** — bar charts for sync activity visualization
+- **react-hot-toast** — toast notifications
+- **Polling-based** — auto-refreshing data (configurable intervals)
+
+### Pages
+
+| Page | Description |
+|---|---|
+| **Dashboard** | 4 stat cards (stores, products synced, failed jobs, last sync) + 7-day bar chart |
+| **Stores** | Store table with product counts, last sync time, status, and "Sync Now" button |
+| **Failed Jobs** | Failed BullMQ jobs with error details, individual + bulk retry |
+| **Logs** | Filterable sync log viewer (by store, status); latest 100 entries |
+| **Health** | DB / Redis / Queue health checks, job count breakdown, live activity feed |
+
+### Quick Start
+
+```bash
+# Development (hot-reload on :5173, proxies API to :3000)
+npm run dashboard:dev
+
+# Production build (served automatically by Express at /dashboard/)
+npm run dashboard:build
+npm start
+```
+
+After building, navigate to `http://localhost:3000/dashboard/`. On first visit you'll be prompted for your API key (stored in `localStorage`).
 
 ---
 
@@ -237,6 +285,19 @@ All `/api/*` routes require `X-API-Key` header (if `API_KEY` is set).
 | `POST` | `/api/sync/trigger` | Queue sync for all active stores |
 | `POST` | `/api/sync/trigger/:storeId` | Queue sync for a specific store |
 
+### Dashboard
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/dashboard/summary` | Total stores, products synced, failed jobs, last sync, 7-day chart data |
+| `GET` | `/api/dashboard/stores` | Stores with product count and last sync status |
+| `GET` | `/api/dashboard/jobs/failed` | List failed BullMQ jobs |
+| `POST` | `/api/dashboard/jobs/retry/:jobId` | Retry a specific failed job |
+| `POST` | `/api/dashboard/jobs/retry-all` | Retry all failed jobs (max 500) |
+| `GET` | `/api/dashboard/logs` | Sync logs with store name. Filter: `?store_id=1&status=failed` |
+| `GET` | `/api/dashboard/health` | DB, Redis, Queue health status + job counts |
+| `GET` | `/api/dashboard/activity` | Live feed of active/waiting/completed jobs |
+
 ---
 
 ## Webhook Endpoints
@@ -245,8 +306,23 @@ Webhook routes do **not** require API key auth (they use signature verification)
 
 | Method | Path | Trigger |
 |---|---|---|
-| `POST` | `/webhooks/woo/:storeId/product-updated` | WooCommerce product update |
-| `POST` | `/webhooks/epos/:storeId/product-updated` | EPOS Now product update |
+| `POST` | `/webhooks/product` | **Unified** — accepts any source (preferred) |
+| `POST` | `/webhooks/woo/:storeId/product-updated` | WooCommerce product update (legacy) |
+| `POST` | `/webhooks/epos/:storeId/product-updated` | EPOS Now product update (legacy) |
+
+### Unified Webhook (`POST /webhooks/product`)
+
+```json
+{
+  "storeId": 1,
+  "source": "epos",
+  "product": { "Id": 12345, "Name": "Widget", ... }
+}
+```
+
+Signature header: `X-Webhook-Signature` (also accepts `X-WC-Webhook-Signature` or `X-EPOS-Signature`).
+
+### Legacy Endpoints
 
 Configure your WooCommerce webhook to point to:
 ```
@@ -278,6 +354,7 @@ epos-woo-sync/
     │   └── auth.js               # API key middleware
     ├── routes/
     │   ├── api.routes.js         # Admin / status / trigger routes
+    │   ├── dashboard.routes.js   # Dashboard API endpoints
     │   └── webhook.routes.js     # Webhook routes
     ├── services/
     │   ├── epos.service.js       # EPOS Now API client (per-store)
@@ -294,6 +371,19 @@ epos-woo-sync/
     └── webhooks/
         ├── epos.webhook.js       # EPOS webhook handler
         └── woo.webhook.js        # WooCommerce webhook handler
+├── dashboard/                    # React admin UI (Vite)
+│   ├── vite.config.js            # Vite config (Tailwind, proxy, base path)
+│   └── src/
+│       ├── main.jsx              # Entry point (BrowserRouter + Toaster)
+│       ├── App.jsx               # Sidebar layout + route definitions
+│       ├── api.js                # API helper (auto API key, 401 handling)
+│       ├── usePolling.js         # Custom polling hook
+│       └── pages/
+│           ├── Dashboard.jsx     # Stats + 7-day bar chart
+│           ├── Stores.jsx        # Store table + sync triggers
+│           ├── FailedJobs.jsx    # Failed job list + retry
+│           ├── Logs.jsx          # Filterable sync log viewer
+│           └── Health.jsx        # Health checks + live activity
 ```
 
 ---
@@ -305,9 +395,9 @@ epos-woo-sync/
 | Function | Description |
 |---|---|
 | `syncAllStores()` | Fetches all active stores, queues a `sync-store` job for each. |
-| `syncStore(storeId, { dryRun })` | Full sync cycle for one store: fetch → match → diff → batch update → log. Returns `{ total, synced, created, failed, skipped }`. |
-| `syncProduct(data)` | Sync a single product (create or update). Used by the worker for individual retries. Throws `UnrecoverableError` on HTTP 400 to prevent BullMQ retry. |
-| `syncProductFromWebhook(data)` | Handle incoming webhook events. Routes to appropriate sync based on `source` and store `sync_direction`. |
+| `syncStore(storeId, { dryRun })` | Delta fetch from EPOS (using `last_synced_at`), queues individual `sync-product` jobs per product. Returns `{ storeId, queued }`. NEVER calls `syncProduct` directly. |
+| `syncProduct(data)` | **Mapping-driven** single-product sync. Checks `product_mappings` → update if mapped → search WooCommerce by SKU if unmapped → link or create. Throws `UnrecoverableError` on HTTP 400/401. |
+| `syncProductFromWebhook(data)` | Handle incoming webhook events. Normalizes EPOS product data and queues a `sync-product` job (or falls back to `sync-store` if no product data). |
 | `getActiveStores()` | Returns all stores with `is_active = 1`. |
 | `getStore(storeId)` | Returns a single store row by ID. |
 
@@ -324,13 +414,13 @@ All jobs: 3 attempts, exponential back-off (2s base), auto-cleanup.
 
 ### Sync Worker (`sync/sync.worker.js`)
 
-BullMQ worker with concurrency 5. Handles job types: `sync-all-stores`, `sync-store`, `sync-product`, `webhook-sync`. Run as a separate process: `npm run worker`.
+BullMQ worker with concurrency 5. Handles job types: `sync-all-stores`, `sync-store`, `sync-product`, `webhook-sync`. Applies a configurable rate-limit delay (`SYNC_RATE_LIMIT_MS`, default 200ms) between product sync jobs. Run as a separate process: `npm run worker`.
 
 ### EPOS Service (`services/epos.service.js`)
 
 | Function | Description |
 |---|---|
-| `fetchAllProducts(store)` | Paginated fetch of all EPOS products (200/page, cached 5min). |
+| `fetchAllProducts(store, opts)` | Paginated fetch of EPOS products (200/page, cached 5min). Pass `{ updatedSince }` for delta sync (skips cache). |
 | `normalizeProduct(raw)` | Transforms raw EPOS object → `{ eposId, name, sku, barcode, price, stock }`. |
 
 ### WooCommerce Service (`services/woo.service.js`)
@@ -380,6 +470,8 @@ BullMQ worker with concurrency 5. Handles job types: `sync-all-stores`, `sync-st
 |---|---|
 | `query(sql, params)` | Execute parameterized query, return rows. |
 | `insertAndGetId(sql, params)` | Execute INSERT, return `insertId`. |
+| `getMapping(storeId, eposProductId)` | Look up a product mapping by store + EPOS ID. Returns row or `null`. |
+| `updateStoreSyncTime(storeId)` | Set `last_synced_at = NOW()` for the given store. |
 | `close()` | Close the connection pool. |
 
 ---
@@ -388,7 +480,7 @@ BullMQ worker with concurrency 5. Handles job types: `sync-all-stores`, `sync-st
 
 | Table | Purpose |
 |---|---|
-| `stores` | Store config: name, EPOS branch ID, WooCommerce credentials, sync direction, active flag. |
+| `stores` | Store config: name, EPOS branch ID, WooCommerce credentials, sync direction, active flag, `last_synced_at` for delta sync. |
 | `product_mappings` | Per-store EPOS ↔ WooCommerce product links. Unique on `(store_id, epos_product_id)`. Tracks match method. |
 | `sync_logs` | Append-only log of every sync action per product (success/failed/skipped). |
 | `sync_runs` | One row per store sync invocation with aggregate stats and timestamps. |
@@ -408,25 +500,44 @@ Cron tick (or POST /api/sync/trigger)
             └→ Queue: sync-store {storeId: 3}
 
 Worker picks up sync-store:
-  1. Fetch EPOS products  (paginated, cached)
-  2. Fetch WooCommerce products  (paginated, cached)
-  3. Match: SKU → Barcode → Name
-  4. Diff: compare price + stock
-  5. Batch update WooCommerce  (chunks of BATCH_SIZE)
-  6. On batch failure → queue individual sync-product retries
-  7. Unmatched EPOS products → queue sync-product (create)
-  8. Log everything to sync_logs + sync_runs
+  1. Delta fetch from EPOS  (updated_since = store.last_synced_at)
+  2. For each EPOS product → Queue: sync-product job
+  3. Update store last_synced_at
+  4. Invalidate cache
+
+Worker picks up sync-product:
+  1. Check product_mappings for existing mapping
+  2a. Mapped     → UPDATE WooCommerce product
+  2b. Not mapped → Search WooCommerce by SKU
+  3a. Found      → LINK mapping + UPDATE
+  3b. Not found  → CREATE new WooCommerce product + mapping
+  4. Rate-limit delay (200ms default)
+  5. Log to sync_logs
 ```
 
 ### Webhook (Real-Time)
 
 ```
-POST /webhooks/woo/1/product-updated
-  └→ Verify signature
-  └→ Queue: webhook-sync {storeId: 1, source: 'woo', productId: 42}
+POST /webhooks/product  (or legacy /webhooks/epos/:storeId/product-updated)
+  └→ Verify HMAC-SHA256 signature
+  └→ Queue: webhook-sync {storeId, source, productId, productData}
        └→ Worker: syncProductFromWebhook()
-            └→ Queue: sync-store (re-sync the store)
+            └→ Normalize product data
+            └→ Queue: sync-product {storeId, eposProduct}
 ```
+
+### Dashboard Routes (`routes/dashboard.routes.js`)
+
+| Endpoint | Description |
+|---|---|
+| `GET /summary` | Aggregate stats: total stores, synced products, failed jobs count, last sync timestamp, 7-day activity breakdown (grouped by date, success vs failed). |
+| `GET /stores` | All stores with `total_products` (from `product_mappings`) and `last_status` (from latest `sync_runs` row). |
+| `GET /jobs/failed` | Failed BullMQ jobs: id, name, storeId, sku, error message, attempts, failedAt timestamp. |
+| `POST /jobs/retry/:jobId` | Retry a single failed job by BullMQ job ID. |
+| `POST /jobs/retry-all` | Retry all failed jobs (capped at 500). Returns count of retried jobs. |
+| `GET /logs` | Sync logs joined with store name. Filterable by `store_id` and `status`. Limit 100. |
+| `GET /health` | Checks DB (`SELECT 1`), Redis (`PING`), Queue (`getJobCounts`). Returns per-service status + queue breakdown. |
+| `GET /activity` | Live feed of active, waiting, and completed jobs from BullMQ (up to 10 each). |
 
 ---
 
@@ -436,7 +547,7 @@ POST /webhooks/woo/1/product-updated
 |---|---|
 | `5xx` / network | Retry (up to 3 attempts, exponential back-off) |
 | `400` | Permanent failure — `UnrecoverableError`, no retry |
-| `401` | Log auth alert, retry (credentials may be temporarily invalid) |
+| `401` | Auth alert logged — `UnrecoverableError`, no retry |
 
 ---
 

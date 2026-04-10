@@ -40,9 +40,10 @@ async function handleProductUpdated(req, res) {
     storeId,
     source: 'epos',
     productId: product.Id,
+    productData: product,
   });
 
   res.json({ received: true });
 }
 
-module.exports = { handleProductUpdated };
+module.exports = { handleProductUpdated, verifySignature };

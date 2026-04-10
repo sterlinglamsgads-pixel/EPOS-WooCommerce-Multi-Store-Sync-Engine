@@ -25,22 +25,21 @@ function createClient(store) {
 //  Read helpers
 // ------------------------------------------------------------------
 
-async function fetchPage(client, page = 1, pageSize = 200) {
-  const response = await client.get('/Product', {
-    params: { page, pageSize },
-  });
-  return response.data;
-}
-
 /**
  * Fetch ALL products from EPOS Now (paginated, cached per store).
+ * Supports delta sync via opts.updatedSince (ISO date string or Date).
  */
-async function fetchAllProducts(store) {
-  const cacheKey = `store:${store.id}:epos:products`;
-  const cached   = await cache.get(cacheKey);
-  if (cached) {
-    logger.debug(`[EPOS] Store ${store.id}: using cached products (${cached.length})`);
-    return cached;
+async function fetchAllProducts(store, opts = {}) {
+  const { updatedSince } = opts;
+
+  // Skip cache when doing delta fetch
+  if (!updatedSince) {
+    const cacheKey = `store:${store.id}:epos:products`;
+    const cached   = await cache.get(cacheKey);
+    if (cached) {
+      logger.debug(`[EPOS] Store ${store.id}: using cached products (${cached.length})`);
+      return cached;
+    }
   }
 
   const client    = createClient(store);
@@ -49,10 +48,19 @@ async function fetchAllProducts(store) {
   let allProducts = [];
   let hasMore     = true;
 
-  logger.info(`[EPOS] Store ${store.id}: starting product fetch…`);
+  const mode = updatedSince ? `delta since ${updatedSince}` : 'full';
+  logger.info(`[EPOS] Store ${store.id}: starting product fetch (${mode})…`);
 
   while (hasMore) {
-    const products = await fetchPage(client, page, PAGE_SIZE);
+    const params = { page, pageSize: PAGE_SIZE };
+    if (updatedSince) {
+      // EPOS Now API accepts updated_since as ISO datetime filter
+      params.updated_since = new Date(updatedSince).toISOString();
+    }
+
+    const response = await client.get('/Product', { params });
+    const products = response.data;
+
     if (!Array.isArray(products) || products.length === 0) break;
 
     allProducts = allProducts.concat(products);
@@ -63,7 +71,12 @@ async function fetchAllProducts(store) {
   }
 
   logger.info(`[EPOS] Store ${store.id}: fetched ${allProducts.length} products in ${page - 1} pages.`);
-  await cache.set(cacheKey, allProducts, 300); // 5-minute TTL
+
+  // Only cache full fetches
+  if (!updatedSince) {
+    await cache.set(`store:${store.id}:epos:products`, allProducts, 300);
+  }
+
   return allProducts;
 }
 

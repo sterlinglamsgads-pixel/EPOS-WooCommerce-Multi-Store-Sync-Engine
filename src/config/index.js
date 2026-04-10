@@ -37,4 +37,9 @@ module.exports = {
   apiKey: process.env.API_KEY || '',
   webhookSecret: process.env.WEBHOOK_SECRET || '',
   wooWebhookSecret: process.env.WOO_WEBHOOK_SECRET || '',
+
+  dashboard: {
+    user: process.env.DASHBOARD_USER || '',
+    pass: process.env.DASHBOARD_PASS || '',
+  },
 };

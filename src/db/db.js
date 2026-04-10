@@ -37,4 +37,24 @@ async function close() {
   }
 }
 
-module.exports = { getPool, query, insertAndGetId, close };
+// ------------------------------------------------------------------
+//  Mapping helpers
+// ------------------------------------------------------------------
+
+async function getMapping(storeId, eposProductId) {
+  const rows = await query(
+    'SELECT * FROM product_mappings WHERE store_id = ? AND epos_product_id = ? LIMIT 1',
+    [storeId, String(eposProductId)]
+  );
+  return rows[0] || null;
+}
+
+// ------------------------------------------------------------------
+//  Store sync-time helper
+// ------------------------------------------------------------------
+
+async function updateStoreSyncTime(storeId) {
+  await query('UPDATE stores SET last_synced_at = NOW() WHERE id = ?', [storeId]);
+}
+
+module.exports = { getPool, query, insertAndGetId, close, getMapping, updateStoreSyncTime };

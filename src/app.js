@@ -1,11 +1,13 @@
 require('dotenv').config();
 
+const path           = require('path');
 const express        = require('express');
 const config         = require('./config');
 const logger         = require('./utils/logger');
 const db             = require('./db/db');
 const cache          = require('./utils/cache');
 const apiRoutes      = require('./routes/api.routes');
+const dashRoutes     = require('./routes/dashboard.routes');
 const webhookRoutes  = require('./routes/webhook.routes');
 const syncJob        = require('./cron/sync.job');
 
@@ -16,6 +18,15 @@ app.use(express.json({
   verify: (req, _res, buf) => { req.rawBody = buf.toString(); },
 }));
 
+// CORS for dev (dashboard on :5173)
+app.use((_req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, X-API-Key');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  if (_req.method === 'OPTIONS') return res.sendStatus(204);
+  next();
+});
+
 // ------------------------------------------------------------------
 //  Routes
 // ------------------------------------------------------------------
@@ -25,7 +36,15 @@ app.get('/health', (_req, res) => {
 });
 
 app.use('/api', apiRoutes);
+app.use('/api/dashboard', dashRoutes);
 app.use('/webhooks', webhookRoutes);
+
+// Serve dashboard static files in production
+const dashDist = path.join(__dirname, '..', 'dashboard', 'dist');
+app.use('/dashboard', express.static(dashDist));
+app.get('/dashboard/*', (_req, res) => {
+  res.sendFile(path.join(dashDist, 'index.html'));
+});
 
 // ------------------------------------------------------------------
 //  Bootstrap

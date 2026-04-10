@@ -1,6 +1,6 @@
 {
   "name": "epos-woo-sync",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "description": "Multi-store product synchronization between EPOS Now and WooCommerce",
   "main": "src/app.js",
   "scripts": {
@@ -9,7 +9,9 @@
     "worker": "node src/sync/sync.worker.js",
     "sync:once": "node src/run-once.js",
     "sync:dry": "DRY_RUN=true node src/run-once.js",
-    "db:init": "node src/db/init.js"
+    "db:init": "node src/db/init.js",
+    "dashboard:dev": "cd dashboard && npm run dev",
+    "dashboard:build": "cd dashboard && npm run build"
   },
   "dependencies": {
     "axios": "^1.6.0",

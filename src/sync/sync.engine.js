@@ -1,15 +1,12 @@
 const { UnrecoverableError } = require('bullmq');
 const eposService            = require('../services/epos.service');
 const wooService             = require('../services/woo.service');
-const { matchProducts }      = require('../utils/matcher');
 const skuUtil                = require('../utils/sku.util');
 const logger                 = require('../utils/logger');
 const db                     = require('../db/db');
 const cache                  = require('../utils/cache');
 const syncQueue              = require('./sync.queue');
 const config                 = require('../config');
-
-const BATCH_SIZE = config.sync.batchSize;
 
 // ------------------------------------------------------------------
 //  Store helpers
@@ -112,7 +109,7 @@ async function syncAllStores() {
 }
 
 // ------------------------------------------------------------------
-//  Sync single store
+//  Sync single store  (delta fetch + queue per-product jobs)
 // ------------------------------------------------------------------
 
 async function syncStore(storeId, { dryRun = false } = {}) {
@@ -121,200 +118,151 @@ async function syncStore(storeId, { dryRun = false } = {}) {
   if (!store.is_active) throw new Error(`Store ${storeId} is inactive`);
 
   const direction = store.sync_direction || config.sync.direction;
-  const mode      = dryRun ? 'DRY-RUN' : 'LIVE';
-  logger.info(`=== Store "${store.name}" sync started [${mode}] [${direction}] ===`);
-
-  const runId = await startRun(storeId, dryRun);
-  const stats = { total: 0, synced: 0, created: 0, failed: 0, skipped: 0 };
-
-  try {
-    // 1. Fetch products from both systems in parallel
-    const [eposRaw, wooProducts] = await Promise.all([
-      eposService.fetchAllProducts(store),
-      wooService.fetchAllProducts(store),
-    ]);
-
-    const eposProducts = eposRaw.map(eposService.normalizeProduct);
-    stats.total = eposProducts.length;
-
-    logger.info(`[SYNC] Store ${storeId}: EPOS ${eposProducts.length} | WOO ${wooProducts.length}`);
-
-    // 2. Match products  (SKU → Barcode → Name)
-    const { matched, unmatched } = matchProducts(eposProducts, wooProducts);
-
-    // 3. Detect changes and build batch updates
-    const batchUpdates = [];
-    const batchMeta    = [];
-
-    for (const { epos: ep, woo: wp, method } of matched) {
-      const currentPrice = parseFloat(wp.regular_price) || 0;
-      const currentStock = parseInt(wp.stock_quantity, 10) || 0;
-      const priceChanged = ep.price !== currentPrice;
-      const stockChanged = ep.stock !== currentStock;
-
-      if (!priceChanged && !stockChanged) {
-        stats.skipped++;
-        continue;
-      }
-
-      batchUpdates.push({
-        id:             wp.id,
-        regular_price:  String(ep.price),
-        stock_quantity: ep.stock,
-        manage_stock:   true,
-      });
-      batchMeta.push({ ep, wp, method, priceChanged, stockChanged });
-    }
-
-    logger.info(
-      `[SYNC] Store ${storeId}: ${batchUpdates.length} updates, ` +
-      `${unmatched.length} unmatched, ${stats.skipped} unchanged`
-    );
-
-    // 4. Push batch updates to WooCommerce
-    for (let i = 0; i < batchUpdates.length; i += BATCH_SIZE) {
-      const chunk     = batchUpdates.slice(i, i + BATCH_SIZE);
-      const metaChunk = batchMeta.slice(i, i + BATCH_SIZE);
-
-      if (dryRun) {
-        for (const m of metaChunk) {
-          const changes = [];
-          if (m.priceChanged) changes.push(`price ${m.wp.regular_price} → ${m.ep.price}`);
-          if (m.stockChanged) changes.push(`stock ${m.wp.stock_quantity} → ${m.ep.stock}`);
-          logger.info(`[DRY-RUN] Store ${storeId}: WOO#${m.wp.id} (${m.ep.sku}): ${changes.join(', ')}`);
-          stats.synced++;
-        }
-        continue;
-      }
-
-      try {
-        await wooService.batchUpdate(store, chunk);
-
-        for (const m of metaChunk) {
-          await upsertMapping(storeId, m.ep, m.wp, m.method);
-          const changes = [];
-          if (m.priceChanged) changes.push(`price → ${m.ep.price}`);
-          if (m.stockChanged) changes.push(`stock → ${m.ep.stock}`);
-          await logSync(storeId, m.ep.sku, 'update', 'success', changes.join(', '));
-          stats.synced++;
-        }
-      } catch (err) {
-        // Batch failed — queue individual product retries
-        for (const m of metaChunk) {
-          stats.failed++;
-          await logSync(storeId, m.ep.sku, 'update', 'failed', err.message);
-          await syncQueue.addSyncProductJob({
-            storeId,
-            eposProduct: m.ep,
-            wooProductId: m.wp.id,
-            action: 'update',
-          });
-        }
-      }
-    }
-
-    // 5. Handle unmatched EPOS products (create in WooCommerce)
-    if (direction !== 'WOO_TO_EPOS') {
-      for (const ep of unmatched) {
-        if (!ep.sku && !ep.barcode) {
-          stats.skipped++;
-          continue;
-        }
-
-        if (dryRun) {
-          logger.info(`[DRY-RUN] Store ${storeId}: would create "${ep.name}" (${ep.sku || ep.barcode})`);
-          stats.created++;
-          continue;
-        }
-
-        await syncQueue.addSyncProductJob({
-          storeId,
-          eposProduct: ep,
-          wooProductId: null,
-          action: 'create',
-        });
-        stats.created++;
-      }
-    }
-
-    // 6. Invalidate product cache for this store
-    await cache.invalidateStore(storeId);
-
-    await finishRun(runId, stats);
-    logger.info(
-      `=== Store "${store.name}" sync done — ` +
-      `synced:${stats.synced} created:${stats.created} failed:${stats.failed} skipped:${stats.skipped} ===`
-    );
-    return stats;
-
-  } catch (err) {
-    logger.error(`[SYNC] Store ${storeId} fatal: ${err.message}`);
-    await finishRun(runId, stats, true);
-    throw err;
+  if (direction === 'WOO_TO_EPOS') {
+    logger.info(`[SYNC] Store "${store.name}": direction is WOO_TO_EPOS — skipping EPOS→WOO sync`);
+    return { storeId, queued: 0 };
   }
+
+  logger.info(`=== Store "${store.name}" sync started [${direction}] ===`);
+
+  // Delta: use last_synced_at for incremental fetch
+  const fetchOpts = {};
+  if (store.last_synced_at) {
+    fetchOpts.updatedSince = store.last_synced_at;
+    logger.info(`[SYNC] Store ${storeId}: delta sync since ${store.last_synced_at}`);
+  } else {
+    logger.info(`[SYNC] Store ${storeId}: full sync (no previous sync timestamp)`);
+  }
+
+  const eposRaw = await eposService.fetchAllProducts(store, fetchOpts);
+  const eposProducts = eposRaw.map(eposService.normalizeProduct);
+
+  logger.info(`[SYNC] Store ${storeId}: ${eposProducts.length} product(s) to sync`);
+
+  // Queue individual sync-product jobs (NEVER call syncProduct directly)
+  let queued = 0;
+  for (const ep of eposProducts) {
+    await syncQueue.addSyncProductJob({
+      storeId,
+      eposProduct: ep,
+      dryRun,
+    });
+    queued++;
+  }
+
+  // Update store's last_synced_at
+  await db.updateStoreSyncTime(storeId);
+
+  // Invalidate product cache for this store
+  await cache.invalidateStore(storeId);
+
+  logger.info(`=== Store "${store.name}" sync done — queued ${queued} product job(s) ===`);
+  return { storeId, queued };
 }
 
 // ------------------------------------------------------------------
-//  Sync individual product  (called by worker for retries / creates)
+//  Sync individual product  (mapping-driven: check → create or update)
 // ------------------------------------------------------------------
 
 async function syncProduct(data) {
-  const { storeId, eposProduct, wooProductId, action } = data;
+  const { storeId, eposProduct, dryRun } = data;
   const store = await getStore(storeId);
   if (!store) throw new Error(`Store ${storeId} not found`);
 
   const sku = eposProduct.sku || eposProduct.barcode || '';
 
   try {
-    if (action === 'create') {
-      const newProduct = await wooService.createProduct(store, {
-        name:           eposProduct.name,
-        sku:            eposProduct.sku || eposProduct.barcode,
-        regular_price:  String(eposProduct.price),
-        stock_quantity: eposProduct.stock,
-        manage_stock:   true,
-        status:         'publish',
-      });
-      await upsertMapping(storeId, eposProduct, newProduct, 'sku');
-      await logSync(storeId, sku, 'create', 'success', `Created WOO#${newProduct.id}`);
-      return { created: newProduct.id };
-    }
+    // 1. Check existing mapping
+    const mapping = await db.getMapping(storeId, eposProduct.eposId);
 
-    if (action === 'update') {
-      await wooService.updateProduct(store, wooProductId, {
+    if (mapping && mapping.woo_product_id) {
+      // ── UPDATE existing mapped product ──
+      if (dryRun) {
+        logger.info(`[DRY-RUN] Store ${storeId}: would update WOO#${mapping.woo_product_id} (${sku})`);
+        return { action: 'update', dryRun: true };
+      }
+
+      await wooService.updateProduct(store, mapping.woo_product_id, {
         regular_price:  String(eposProduct.price),
         stock_quantity: eposProduct.stock,
         manage_stock:   true,
       });
-      await logSync(storeId, sku, 'update', 'success', `Updated WOO#${wooProductId}`);
-      return { updated: wooProductId };
+      await upsertMapping(storeId, eposProduct, { id: mapping.woo_product_id }, mapping.match_method || 'sku');
+      await logSync(storeId, sku, 'update', 'success', `Updated WOO#${mapping.woo_product_id}`);
+      return { action: 'update', wooProductId: mapping.woo_product_id };
     }
 
-    throw new Error(`Unknown sync action: ${action}`);
+    // 2. No mapping — try to find in WooCommerce by SKU/barcode
+    const searchSku = eposProduct.sku || eposProduct.barcode;
+    let wooProduct  = null;
+    if (searchSku) {
+      wooProduct = await wooService.findBySku(store, searchSku);
+    }
+
+    if (wooProduct) {
+      // ── LINK & UPDATE existing WooCommerce product ──
+      if (dryRun) {
+        logger.info(`[DRY-RUN] Store ${storeId}: would link & update WOO#${wooProduct.id} (${sku})`);
+        return { action: 'link', dryRun: true };
+      }
+
+      await wooService.updateProduct(store, wooProduct.id, {
+        regular_price:  String(eposProduct.price),
+        stock_quantity: eposProduct.stock,
+        manage_stock:   true,
+      });
+      await upsertMapping(storeId, eposProduct, wooProduct, 'sku');
+      await logSync(storeId, sku, 'link', 'success', `Linked & updated WOO#${wooProduct.id}`);
+      return { action: 'link', wooProductId: wooProduct.id };
+    }
+
+    // 3. No match anywhere — create new product in WooCommerce
+    if (!searchSku) {
+      await logSync(storeId, sku, 'create', 'skipped', 'No SKU or barcode — cannot create');
+      return { action: 'skipped' };
+    }
+
+    if (dryRun) {
+      logger.info(`[DRY-RUN] Store ${storeId}: would create "${eposProduct.name}" (${searchSku})`);
+      return { action: 'create', dryRun: true };
+    }
+
+    const newProduct = await wooService.createProduct(store, {
+      name:           eposProduct.name,
+      sku:            searchSku,
+      regular_price:  String(eposProduct.price),
+      stock_quantity: eposProduct.stock,
+      manage_stock:   true,
+      status:         'publish',
+    });
+    await upsertMapping(storeId, eposProduct, newProduct, 'sku');
+    await logSync(storeId, sku, 'create', 'success', `Created WOO#${newProduct.id}`);
+    return { action: 'create', wooProductId: newProduct.id };
 
   } catch (err) {
-    await logSync(storeId, sku, action, 'failed', err.message);
+    await logSync(storeId, sku, 'sync', 'failed', err.message);
 
-    // Smart retry logic based on HTTP status
+    // Smart error handling based on HTTP status
     const status = err.response?.status;
     if (status === 401) {
       logger.error(`[SYNC] Store ${storeId}: AUTH FAILURE — check WooCommerce credentials`);
+      throw new UnrecoverableError(`Auth failure (401): ${err.message}`);
     }
     if (status === 400) {
       // Permanent failure — do NOT retry
       throw new UnrecoverableError(`Permanent failure (400): ${err.message}`);
     }
-    // 5xx / network errors will be retried automatically by BullMQ
+    // 5xx / network errors — BullMQ will retry automatically
     throw err;
   }
 }
 
 // ------------------------------------------------------------------
-//  Webhook-triggered sync
+//  Webhook-triggered sync  (always goes through the queue)
 // ------------------------------------------------------------------
 
 async function syncProductFromWebhook(data) {
-  const { storeId, source, productId } = data;
+  const { storeId, source, productId, productData } = data;
   const store = await getStore(storeId);
   if (!store) throw new Error(`Store ${storeId} not found`);
 
@@ -330,15 +278,15 @@ async function syncProductFromWebhook(data) {
   if (source === 'epos' && (direction === 'EPOS_TO_WOO' || direction === 'BIDIRECTIONAL')) {
     logger.info(`[WEBHOOK] EPOS update for store ${storeId}, product ${productId}`);
 
-    // Look up existing mapping
-    const mappings = await db.query(
-      'SELECT * FROM product_mappings WHERE store_id = ? AND epos_product_id = ?',
-      [storeId, String(productId)]
-    );
-
-    if (mappings.length > 0 && mappings[0].woo_product_id) {
-      // Queue a store sync to pick up the fresh data
+    // Normalize the incoming EPOS product and queue a sync-product job
+    if (productData) {
+      const eposProduct = eposService.normalizeProduct(productData);
+      await syncQueue.addSyncProductJob({ storeId, eposProduct });
+      logger.info(`[WEBHOOK] Queued sync-product for EPOS#${eposProduct.eposId} → store ${storeId}`);
+    } else {
+      // No product data — trigger a full store sync to pick up the change
       await syncQueue.addSyncStoreJob(storeId);
+      logger.info(`[WEBHOOK] No product data — queued full store sync for store ${storeId}`);
     }
     return;
   }
